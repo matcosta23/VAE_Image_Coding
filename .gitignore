@@ -1,0 +1,4 @@
+.vscode/
+Datasets/
+tensorboard_logs/
+vae_logs/
