@@ -103,14 +103,12 @@ class VAE(pl.LightningModule):
         return elbo, kl, recon_lkh
 
 
-    def create_dictionary(self, x, x_hat, elbo, kl, recon_lkh):
-        random_index = np.random.choice(len(x))
+    def create_dictionary(self, elbo, kl, recon_lkh):
+        ##### Define dictionary with metrics.
         dictionary = {
             'loss': elbo,
             'kl': kl.mean(),
-            'recon_lkh': recon_lkh.mean(),
-            'original_img': x[random_index],
-            'recon_img': x_hat[random_index]
+            'recon_lkh': recon_lkh.mean()
         }
 
         return dictionary
@@ -138,7 +136,12 @@ class VAE(pl.LightningModule):
         ########## Compute Losses
         elbo, kl, recon_lkh = self.compute_losses(x, z, x_hat)
         ##### Return batch information
-        batch_dictionary = self.create_dictionary(x, x_hat, elbo, kl, recon_lkh)
+        batch_dictionary = self.create_dictionary(elbo, kl, recon_lkh)
+        ##### Save sample as example.
+        if np.random.choice([True, False], p=[0.05, 0.95]):
+            random_index = np.random.choice(len(x))
+            self.orig_training_sample = x[random_index]
+            self.rec_training_sample = x_hat[random_index]
 
         return batch_dictionary
 
@@ -151,31 +154,41 @@ class VAE(pl.LightningModule):
         ##### Get Losses
         elbo, kl, recon_lkh = self.compute_losses(x, z, x_hat)
         ##### Create dictionary
-        val_dictionary = self.create_dictionary(x, x_hat, elbo, kl, recon_lkh)
-        
+        val_dictionary = self.create_dictionary(elbo, kl, recon_lkh)
+        ##### Save sample as example.
+        if np.random.choice([True, False]):
+            self.orig_validation_sample = x[0]
+            self.rec_validation_sample = x_hat[0]
+
         return val_dictionary
 
 
     def training_epoch_end(self, outputs):
         ##### Get scalars and images
-        mean_losses, original_image, recon_image = self.get_scalars_and_images(outputs)
+        mean_losses = torch.mean(torch.as_tensor([[batch['loss'], batch['kl'], batch['recon_lkh']] for batch in outputs]), 0)
         ##### Include scalars in tensorboard
         list(map(lambda metric, value: self.logger.experiment.add_scalar(metric, value, self.current_epoch), 
                                             ['ELBO_Loss', 'KL_Loss', 'Recon_Likelihood'], mean_losses))
         ##### Include images
-        self.logger.experiment.add_image("Original_Image", original_image, self.current_epoch)
-        self.logger.experiment.add_image("Reconstructed_Image", recon_image, self.current_epoch)
+        try:
+            self.logger.experiment.add_image("Original_Image", self.orig_training_sample, self.current_epoch)
+            self.logger.experiment.add_image("Reconstructed_Image", self.rec_training_sample, self.current_epoch)
+        except AttributeError:
+            pass
 
 
     def validation_epoch_end(self, validation_step_outputs):
         ##### Get scalars and images
-        mean_losses, original_image, recon_image = self.get_scalars_and_images(validation_step_outputs)
+        mean_losses = torch.mean(torch.as_tensor([[batch['loss'], batch['kl'], batch['recon_lkh']] for batch in validation_step_outputs]), 0)
         ##### Include scalars in tensorboard
         list(map(lambda metric, value: self.logger.experiment.add_scalar(metric, value, self.current_epoch), 
                                             ['Val_ELBO_Loss', 'Val_KL_Loss', 'Val_Recon_Likelihood'], mean_losses))
         ##### Include images
-        self.logger.experiment.add_image("Val_Original_Image", original_image, self.current_epoch)
-        self.logger.experiment.add_image("Val_Reconstructed_Image", recon_image, self.current_epoch)
+        try:
+            self.logger.experiment.add_image("Val_Original_Image", self.orig_validation_sample, self.current_epoch)
+            self.logger.experiment.add_image("Val_Reconstructed_Image", self.rec_validation_sample, self.current_epoch)
+        except AttributeError:
+            pass
 
 
 
@@ -190,6 +203,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_logs_folder', default="vae_with_rn18", help='Folder to save logs of current running.')
     parser.add_argument('--batchsize', default=8, type=int, help='Batch size.')
     parser.add_argument('--gpus', default=1, type=int, help="Amount of GPU availables.")
+    parser.add_argument('--num_workers', default=0, type=int, help="CPU cores for multi-processing.")
     parser.add_argument('--epochs', default=200000, type=int, help="Epochs to run.")
     ##### Return namespace.
     args = parser.parse_args(sys.argv[1:])
@@ -205,8 +219,8 @@ if __name__ == "__main__":
                                             transform=transforms.Compose([
                                                 transforms.ToTensor()
                                             ]))
-    train_dl = DataLoader(training_folder, batch_size=args.batchsize, shuffle=True, num_workers=4)
-    test_dl = DataLoader(testing_folder, num_workers=4)
+    train_dl = DataLoader(training_folder, batch_size=args.batchsize, shuffle=True, num_workers=args.num_workers)
+    test_dl = DataLoader(testing_folder, num_workers=args.num_workers)
 
     ##### Instantiate and run model
     vae = VAE()
