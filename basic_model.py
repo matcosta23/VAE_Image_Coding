@@ -18,11 +18,17 @@ from torchvision import datasets, transforms
 
 class VAE(pl.LightningModule):
 
-    def __init__(self, resnet_filters=128):        
+    def __init__(self, train_batches_amount, batchsize, resnet_filters=128):        
 
         ##### Run builder method defined in parent class.
         super().__init__()
         self.save_hyperparameters()
+
+        ##### Save DataLoaders sizes
+        self.train_batches_amount = train_batches_amount
+        self.train_idx = train_batches_amount - 1
+        self.test_images_amount = batchsize
+        self.test_idx = batchsize - 1
 
         ##### Instantiate encoder and decoder
         self.encoder = ResNetEncoder(resnet_filters)
@@ -138,7 +144,7 @@ class VAE(pl.LightningModule):
         ##### Return batch information
         batch_dictionary = self.create_dictionary(elbo, kl, recon_lkh)
         ##### Save sample as example.
-        if np.random.choice([True, False], p=[0.05, 0.95]):
+        if self.train_idx == batch_idx:
             random_index = np.random.choice(len(x))
             self.orig_training_sample = x[random_index]
             self.rec_training_sample = x_hat[random_index]
@@ -156,7 +162,7 @@ class VAE(pl.LightningModule):
         ##### Create dictionary
         val_dictionary = self.create_dictionary(elbo, kl, recon_lkh)
         ##### Save sample as example.
-        if np.random.choice([True, False]):
+        if self.test_idx == batch_idx:
             self.orig_validation_sample = x[0]
             self.rec_validation_sample = x_hat[0]
 
@@ -170,11 +176,9 @@ class VAE(pl.LightningModule):
         list(map(lambda metric, value: self.logger.experiment.add_scalar(metric, value, self.current_epoch), 
                                             ['ELBO_Loss', 'KL_Loss', 'Recon_Likelihood'], mean_losses))
         ##### Include images
-        try:
-            self.logger.experiment.add_image("Original_Image", self.orig_training_sample, self.current_epoch)
-            self.logger.experiment.add_image("Reconstructed_Image", self.rec_training_sample, self.current_epoch)
-        except AttributeError:
-            pass
+        self.logger.experiment.add_image("Original_Image", self.orig_training_sample, self.current_epoch)
+        self.logger.experiment.add_image("Reconstructed_Image", self.rec_training_sample, self.current_epoch)
+        self.train_idx = np.random.choice(self.train_batches_amount)
 
 
     def validation_epoch_end(self, validation_step_outputs):
@@ -184,11 +188,9 @@ class VAE(pl.LightningModule):
         list(map(lambda metric, value: self.logger.experiment.add_scalar(metric, value, self.current_epoch), 
                                             ['Val_ELBO_Loss', 'Val_KL_Loss', 'Val_Recon_Likelihood'], mean_losses))
         ##### Include images
-        try:
-            self.logger.experiment.add_image("Val_Original_Image", self.orig_validation_sample, self.current_epoch)
-            self.logger.experiment.add_image("Val_Reconstructed_Image", self.rec_validation_sample, self.current_epoch)
-        except AttributeError:
-            pass
+        self.logger.experiment.add_image("Val_Original_Image", self.orig_validation_sample, self.current_epoch)
+        self.logger.experiment.add_image("Val_Reconstructed_Image", self.rec_validation_sample, self.current_epoch)
+        self.test_idx = np.random.choice(self.test_images_amount)
 
 
 
@@ -214,16 +216,15 @@ if __name__ == "__main__":
                                                 transforms.ToTensor(),
                                                 transforms.RandomResizedCrop(args.patch_dimension)
                                             ]))
-    # TODO: Create testing images folder
     testing_folder = datasets.ImageFolder(args.testing_images_folder,
                                             transform=transforms.Compose([
                                                 transforms.ToTensor()
                                             ]))
     train_dl = DataLoader(training_folder, batch_size=args.batchsize, shuffle=True, num_workers=args.num_workers)
-    test_dl = DataLoader(testing_folder, num_workers=args.num_workers)
+    test_dl = DataLoader(testing_folder, shuffle=True, num_workers=args.num_workers)
 
     ##### Instantiate and run model
-    vae = VAE()
+    vae = VAE(len(train_dl), args.batchsize)
     logger = TensorBoardLogger(args.tsb_folder, name=args.model_logs_folder)
     trainer = pl.Trainer(gpus=args.gpus, max_epochs=args.epochs, progress_bar_refresh_rate=100, logger=logger)
     trainer.fit(vae, train_dl, test_dl)
