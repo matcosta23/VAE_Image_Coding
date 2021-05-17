@@ -6,7 +6,8 @@ import matplotlib.pyplot as plt
 
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
-from pl_bolts.models.autoencoders.components import resnet18_decoder, resnet18_encoder
+from resnet_model import ResNetEncoder, ResNetDecoder
+#from pl_bolts.models.autoencoders.components import resnet18_decoder, resnet18_encoder
 
 import torch 
 from torch import nn
@@ -17,19 +18,25 @@ from torchvision import datasets, transforms
 
 class VAE(pl.LightningModule):
 
-    def __init__(self, enc_out_dim=512, latent_dim=256, input_height=32):        
+    def __init__(self, input_shape, resnet_filters=64):        
+
         ##### Run builder method defined in parent class.
         super().__init__()
         self.save_hyperparameters()
 
         ##### Instantiate encoder and decoder
-        self.encoder = resnet18_encoder(False, False)
-        self.decoder = resnet18_decoder(latent_dim=latent_dim, input_height=input_height,
-                                        first_conv=False, maxpool1=False)
+        self.encoder = ResNetEncoder(resnet_filters)
+        self.decoder = ResNetDecoder(resnet_filters)
 
         ##### Obtain distribution parameters from latent output.
-        self.fc_mu = nn.Linear(enc_out_dim, latent_dim)
-        self.fc_var = nn.Linear(enc_out_dim, latent_dim)
+        self.flatten = nn.Flatten()
+        self.latent_shape = self.encoder.compute_latent_shape(input_shape)
+        latent_elements = np.prod(self.latent_shape)
+        self.fc_mu = nn.Linear(latent_elements, latent_elements//resnet_filters)
+        self.fc_var = nn.Linear(latent_elements, latent_elements//resnet_filters)
+
+        ##### Generate latent from sample
+        self.latent_from_sample = nn.Linear(latent_elements//resnet_filters, latent_elements)
 
         ##### Learned variance for Gaussian distribution P(x|z)
         self.log_scale = nn.Parameter(torch.Tensor([0.0]))
@@ -71,14 +78,18 @@ class VAE(pl.LightningModule):
         x, _ = batch
         ##### Get encoder latent and generate learned parameters.
         x_encoded = self.encoder(x)
-        mu, log_var = self.fc_mu(x_encoded), self.fc_var(x_encoded)
+        #flattened_latent = x_encoded.view(x_encoded.shape[0], -1)
+        flattened_latent = self.flatten(x_encoded)
+        mu, log_var = self.fc_mu(flattened_latent), self.fc_var(flattened_latent)
         ##### Define learned multivariate distribution Q(z|x).
         std = torch.exp(log_var / 2)
         self.q = torch.distributions.Normal(mu, std)
         ##### Sample latent from distribution.
         z = self.q.rsample()
         ##### Reconstruct Image from sampled latent.
-        x_hat = vae.decoder(z)
+        latent_from_sample = self.latent_from_sample(z)
+        reshaped_latent = latent_from_sample.view((x.shape[0], *self.latent_shape))
+        x_hat = self.decoder(reshaped_latent)
 
         ########## Compute Losses
         ##### Compute Reconstruction Loss
@@ -139,7 +150,8 @@ if __name__ == "__main__":
     dataset_loader = DataLoader(training_folder, batch_size=args.batchsize, shuffle=True)
 
     ##### Instantiate and run model
-    vae = VAE(input_height=args.patch_dimension)
+    input_shape = [3, args.patch_dimension, args.patch_dimension]
+    vae = VAE(input_shape=input_shape)
     logger = TensorBoardLogger(args.tsb_folder, name=args.model_logs_folder)
     trainer = pl.Trainer(gpus=args.gpus, max_epochs=args.epochs, progress_bar_refresh_rate=50, logger=logger)
     trainer.fit(vae, dataset_loader)

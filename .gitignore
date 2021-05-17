@@ -2,3 +2,4 @@
 Datasets/
 tensorboard_logs/
 vae_logs/
+__pycache__/
