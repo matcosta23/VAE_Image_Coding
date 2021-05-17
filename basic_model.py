@@ -18,7 +18,7 @@ from torchvision import datasets, transforms
 
 class VAE(pl.LightningModule):
 
-    def __init__(self, input_shape, resnet_filters=64):        
+    def __init__(self, resnet_filters=128):        
 
         ##### Run builder method defined in parent class.
         super().__init__()
@@ -30,13 +30,7 @@ class VAE(pl.LightningModule):
 
         ##### Obtain distribution parameters from latent output.
         self.flatten = nn.Flatten()
-        self.latent_shape = self.encoder.compute_latent_shape(input_shape)
-        latent_elements = np.prod(self.latent_shape)
-        self.fc_mu = nn.Linear(latent_elements, latent_elements//resnet_filters)
-        self.fc_var = nn.Linear(latent_elements, latent_elements//resnet_filters)
-
-        ##### Generate latent from sample
-        self.latent_from_sample = nn.Linear(latent_elements//resnet_filters, latent_elements)
+        self.latent_conv = nn.Conv2d(resnet_filters, resnet_filters*2, kernel_size=3, padding=1)
 
         ##### Learned variance for Gaussian distribution P(x|z)
         self.log_scale = nn.Parameter(torch.Tensor([0.0]))
@@ -71,27 +65,33 @@ class VAE(pl.LightningModule):
         return kl
 
 
-    def training_step(self, batch, batch_idx):
-
-        ########## Run batch through network
-        ##### Get images from batch.
-        x, _ = batch
+    def encode_batch(self, x):
         ##### Get encoder latent and generate learned parameters.
         x_encoded = self.encoder(x)
-        #flattened_latent = x_encoded.view(x_encoded.shape[0], -1)
+        latent_shape = x_encoded.shape
         flattened_latent = self.flatten(x_encoded)
-        mu, log_var = self.fc_mu(flattened_latent), self.fc_var(flattened_latent)
+        mu, log_var = torch.tensor_split(flattened_latent, 2, axis=1)
         ##### Define learned multivariate distribution Q(z|x).
         std = torch.exp(log_var / 2)
         self.q = torch.distributions.Normal(mu, std)
         ##### Sample latent from distribution.
         z = self.q.rsample()
-        ##### Reconstruct Image from sampled latent.
-        latent_from_sample = self.latent_from_sample(z)
-        reshaped_latent = latent_from_sample.view((x.shape[0], *self.latent_shape))
-        x_hat = self.decoder(reshaped_latent)
+        
+        return z, latent_shape
 
-        ########## Compute Losses
+    
+    def decode_latent(self, z, latent_shape):
+        ##### Reshape 'z' tensor with same spatial dimensions and half channels from latent output by encoder.
+        z = z.view((latent_shape[0], latent_shape[1]//2, *latent_shape[2:]))
+        ##### Double channel dimension
+        latent = self.latent_conv(z)
+        ##### Decode latent
+        x_hat = self.decoder(latent)
+        
+        return x_hat
+
+
+    def compute_losses(self, x, z, x_hat):
         ##### Compute Reconstruction Loss
         recon_lkh = self.gaussian_likelihood(x_hat, x)
         ##### Compute KL divergence from Monte Carlo Approach
@@ -99,25 +99,66 @@ class VAE(pl.LightningModule):
         ##### Combine losses and define ELBO loss.
         elbo = (kl - recon_lkh)
         elbo = elbo.mean()
-        ##### Return batch information
-        batch_dictionary = {
+
+        return elbo, kl, recon_lkh
+
+
+    def create_dictionary(self, x, x_hat, elbo, kl, recon_lkh):
+        random_index = np.random.choice(len(x))
+        dictionary = {
             'loss': elbo,
             'kl': kl.mean(),
             'recon_lkh': recon_lkh.mean(),
-            'original_img': x[0],
-            'recon_img': x_hat[0]
+            'original_img': x[random_index],
+            'recon_img': x_hat[random_index]
         }
+
+        return dictionary
+
+
+    def get_scalars_and_images(self, dictionary):
+        ##### Compute epoch means.
+        mean_losses = torch.mean(torch.as_tensor([[batch['loss'], batch['kl'], batch['recon_lkh']] for batch in dictionary]), 0)
+        ##### Get images
+        random_index = np.random.choice(len(dictionary))
+        original_image = dictionary[random_index]['original_img']
+        recon_image = dictionary[random_index]['recon_img']
+
+        return mean_losses, original_image, recon_image
+
+
+    def training_step(self, batch, batch_idx):
+        ########## Run batch through network
+        ##### Get images from batch.
+        x, _ = batch
+        ##### Encode Batch
+        z, latent_shape = self.encode_batch(x)
+        ##### Reconstruct Image from sampled latent.
+        x_hat = self.decode_latent(z, latent_shape)
+        ########## Compute Losses
+        elbo, kl, recon_lkh = self.compute_losses(x, z, x_hat)
+        ##### Return batch information
+        batch_dictionary = self.create_dictionary(x, x_hat, elbo, kl, recon_lkh)
 
         return batch_dictionary
 
 
+    def validation_step(self, batch, batch_idx):
+        ##### Validate images
+        x, _ = batch
+        z, latent_shape = self.encode_batch(x)
+        x_hat = self.decode_latent(z, latent_shape)
+        ##### Get Losses
+        elbo, kl, recon_lkh = self.compute_losses(x, z, x_hat)
+        ##### Create dictionary
+        val_dictionary = self.create_dictionary(x, x_hat, elbo, kl, recon_lkh)
+        
+        return val_dictionary
+
+
     def training_epoch_end(self, outputs):
-        ##### Compute epoch means.
-        mean_losses = torch.mean(torch.as_tensor([[batch['loss'], batch['kl'], batch['recon_lkh']] for batch in outputs]), 0)
-        ##### Get images
-        random_index = np.random.choice(len(outputs))
-        original_image = outputs[random_index]['original_img']
-        recon_image = outputs[random_index]['recon_img']
+        ##### Get scalars and images
+        mean_losses, original_image, recon_image = self.get_scalars_and_images(outputs)
         ##### Include scalars in tensorboard
         list(map(lambda metric, value: self.logger.experiment.add_scalar(metric, value, self.current_epoch), 
                                             ['ELBO_Loss', 'KL_Loss', 'Recon_Likelihood'], mean_losses))
@@ -126,12 +167,24 @@ class VAE(pl.LightningModule):
         self.logger.experiment.add_image("Reconstructed_Image", recon_image, self.current_epoch)
 
 
+    def validation_epoch_end(self, validation_step_outputs):
+        ##### Get scalars and images
+        mean_losses, original_image, recon_image = self.get_scalars_and_images(validation_step_outputs)
+        ##### Include scalars in tensorboard
+        list(map(lambda metric, value: self.logger.experiment.add_scalar(metric, value, self.current_epoch), 
+                                            ['Val_ELBO_Loss', 'Val_KL_Loss', 'Val_Recon_Likelihood'], mean_losses))
+        ##### Include images
+        self.logger.experiment.add_image("Val_Original_Image", original_image, self.current_epoch)
+        self.logger.experiment.add_image("Val_Reconstructed_Image", recon_image, self.current_epoch)
+
+
 
 if __name__ == "__main__":
     ##### Define parser
     parser = argparse.ArgumentParser(description="Receives arguments for encoding.")
     ##### Define arguments.
     parser.add_argument('--training_images_folder', required=True, help='Path to folder with subfolders.')
+    parser.add_argument('--testing_images_folder', required=True, help='Path to folder with subfolders.')
     parser.add_argument('--patch_dimension', default=256, type=int, help="Patch dimension used in training stage.")
     parser.add_argument('--tsb_folder', default="tensorboard_logs", help="Folder to save Tensorboard logs.")
     parser.add_argument('--model_logs_folder', default="vae_with_rn18", help='Folder to save logs of current running.')
@@ -141,19 +194,24 @@ if __name__ == "__main__":
     ##### Return namespace.
     args = parser.parse_args(sys.argv[1:])
 
-    ##### Get training folder and create data bunch.
+    ##### Get training and testing folder and create data loaders.
     training_folder = datasets.ImageFolder(args.training_images_folder,
                                             transform=transforms.Compose([
                                                 transforms.ToTensor(),
                                                 transforms.RandomResizedCrop(args.patch_dimension)
                                             ]))
-    dataset_loader = DataLoader(training_folder, batch_size=args.batchsize, shuffle=True)
+    # TODO: Create testing images folder
+    testing_folder = datasets.ImageFolder(args.testing_images_folder,
+                                            transform=transforms.Compose([
+                                                transforms.ToTensor()
+                                            ]))
+    train_dl = DataLoader(training_folder, batch_size=args.batchsize, shuffle=True, num_workers=4)
+    test_dl = DataLoader(testing_folder, num_workers=4)
 
     ##### Instantiate and run model
-    input_shape = [3, args.patch_dimension, args.patch_dimension]
-    vae = VAE(input_shape=input_shape)
+    vae = VAE()
     logger = TensorBoardLogger(args.tsb_folder, name=args.model_logs_folder)
-    trainer = pl.Trainer(gpus=args.gpus, max_epochs=args.epochs, progress_bar_refresh_rate=50, logger=logger)
-    trainer.fit(vae, dataset_loader)
+    trainer = pl.Trainer(gpus=args.gpus, max_epochs=args.epochs, progress_bar_refresh_rate=100, logger=logger)
+    trainer.fit(vae, train_dl, test_dl)
 
     print("Training Finished")
