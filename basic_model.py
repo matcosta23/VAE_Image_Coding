@@ -152,9 +152,9 @@ class VAE(pl.LightningModule):
         ##### Create dictionary
         val_dictionary = self.create_dictionary(elbo, kl, recon_lkh)
         ##### Include PSNR into dictionary
-        res_orig_image = (255 * x[0].numpy()).astype(np.uint8)
-        res_rec_image  = (255 * x_hat[0].numpy()).astype(np.uint8)
-        psnr = 10 * math.log10((255**2)/(np.mean(np.square(np.subtract(res_orig_image, res_rec_image)))))
+        res_orig_image = torch.round(255 * x[0])
+        res_rec_image  = torch.round(255 * x_hat[0])
+        psnr = 10 * math.log10((255**2)/(torch.mean(torch.square(torch.subtract(res_orig_image, res_rec_image)))))
         val_dictionary.update({"psnr": psnr})
         ##### Save sample as example.
         if self.test_idx == batch_idx:
