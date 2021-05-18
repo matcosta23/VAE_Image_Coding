@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
 from resnet_model import ResNetEncoder, ResNetDecoder
-#from pl_bolts.models.autoencoders.components import resnet18_decoder, resnet18_encoder
 
 import torch 
 from torch import nn
@@ -120,17 +119,6 @@ class VAE(pl.LightningModule):
         return dictionary
 
 
-    def get_scalars_and_images(self, dictionary):
-        ##### Compute epoch means.
-        mean_losses = torch.mean(torch.as_tensor([[batch['loss'], batch['kl'], batch['recon_lkh']] for batch in dictionary]), 0)
-        ##### Get images
-        random_index = np.random.choice(len(dictionary))
-        original_image = dictionary[random_index]['original_img']
-        recon_image = dictionary[random_index]['recon_img']
-
-        return mean_losses, original_image, recon_image
-
-
     def training_step(self, batch, batch_idx):
         ########## Run batch through network
         ##### Get images from batch.
@@ -139,8 +127,6 @@ class VAE(pl.LightningModule):
         z, latent_shape = self.encode_batch(x)
         ##### Reconstruct Image from sampled latent.
         x_hat = self.decode_latent(z, latent_shape)
-        ##### Clip tensor to range 0-1.
-        x_hat = torch.clip(x_hat, 0., 1.)
         ########## Compute Losses
         elbo, kl, recon_lkh = self.compute_losses(x, z, x_hat)
         ##### Return batch information
@@ -203,10 +189,10 @@ if __name__ == "__main__":
     ##### Define arguments.
     parser.add_argument('--training_images_folder', required=True, help='Path to folder with subfolders.')
     parser.add_argument('--testing_images_folder', required=True, help='Path to folder with subfolders.')
-    parser.add_argument('--model_checkpoint', default="vae_checkpoint", help="Path to save model's checkpoint.")
+    parser.add_argument('--restore_checkpoint', required=False, help="Path to checkpoint from where model can be restored.")
     parser.add_argument('--patch_dimension', default=256, type=int, help="Patch dimension used in training stage.")
     parser.add_argument('--tsb_folder', default="tensorboard_logs", help="Folder to save Tensorboard logs.")
-    parser.add_argument('--model_logs_folder', default="vae_with_rn18", help='Folder to save logs of current running.')
+    parser.add_argument('--model_logs_folder', default="vae", help='Folder to save logs of current running.')
     parser.add_argument('--batchsize', default=8, type=int, help='Batch size.')
     parser.add_argument('--gpus', default=1, type=int, help="Amount of GPU availables.")
     parser.add_argument('--num_workers', default=0, type=int, help="CPU cores for multi-processing.")
@@ -227,10 +213,17 @@ if __name__ == "__main__":
     train_dl = DataLoader(training_folder, batch_size=args.batchsize, shuffle=True, num_workers=args.num_workers)
     test_dl = DataLoader(testing_folder, shuffle=True, num_workers=args.num_workers)
 
+
     ##### Instantiate and run model
     vae = VAE(len(train_dl), args.batchsize)
     logger = TensorBoardLogger(args.tsb_folder, name=args.model_logs_folder)
-    trainer = pl.Trainer(default_root_dir=args.model_checkpoint, gpus=args.gpus, max_epochs=args.epochs, progress_bar_refresh_rate=100, logger=logger)
+    trainer = pl.Trainer(
+        resume_from_checkpoint=args.restore_checkpoint, 
+        gpus=args.gpus,
+        max_epochs=args.epochs,
+        progress_bar_refresh_rate=100,
+        logger=logger
+    )
     trainer.fit(vae, train_dl, test_dl)
 
     print("Training Finished")
