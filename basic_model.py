@@ -18,7 +18,7 @@ from torchvision import datasets, transforms
 
 class VAE(pl.LightningModule):
 
-    def __init__(self, train_batches_amount, batchsize, resnet_filters=128):        
+    def __init__(self, train_batches_amount=None, batchsize=None, resnet_filters=128):        
 
         ##### Run builder method defined in parent class.
         super().__init__()
@@ -26,9 +26,9 @@ class VAE(pl.LightningModule):
 
         ##### Save DataLoaders sizes
         self.train_batches_amount = train_batches_amount
-        self.train_idx = train_batches_amount - 1
+        self.train_idx = 0
         self.test_images_amount = batchsize
-        self.test_idx = batchsize - 1
+        self.test_idx = 0
 
         ##### Instantiate encoder and decoder
         self.encoder = ResNetEncoder(resnet_filters)
@@ -139,6 +139,8 @@ class VAE(pl.LightningModule):
         z, latent_shape = self.encode_batch(x)
         ##### Reconstruct Image from sampled latent.
         x_hat = self.decode_latent(z, latent_shape)
+        ##### Clip tensor to range 0-1.
+        x_hat = torch.clip(x_hat, 0., 1.)
         ########## Compute Losses
         elbo, kl, recon_lkh = self.compute_losses(x, z, x_hat)
         ##### Return batch information
@@ -157,6 +159,7 @@ class VAE(pl.LightningModule):
         x, _ = batch
         z, latent_shape = self.encode_batch(x)
         x_hat = self.decode_latent(z, latent_shape)
+        x_hat = torch.clip(x_hat, 0., 1.)
         ##### Get Losses
         elbo, kl, recon_lkh = self.compute_losses(x, z, x_hat)
         ##### Create dictionary
@@ -200,6 +203,7 @@ if __name__ == "__main__":
     ##### Define arguments.
     parser.add_argument('--training_images_folder', required=True, help='Path to folder with subfolders.')
     parser.add_argument('--testing_images_folder', required=True, help='Path to folder with subfolders.')
+    parser.add_argument('--model_checkpoint', default="vae_checkpoint", help="Path to save model's checkpoint.")
     parser.add_argument('--patch_dimension', default=256, type=int, help="Patch dimension used in training stage.")
     parser.add_argument('--tsb_folder', default="tensorboard_logs", help="Folder to save Tensorboard logs.")
     parser.add_argument('--model_logs_folder', default="vae_with_rn18", help='Folder to save logs of current running.')
@@ -226,7 +230,7 @@ if __name__ == "__main__":
     ##### Instantiate and run model
     vae = VAE(len(train_dl), args.batchsize)
     logger = TensorBoardLogger(args.tsb_folder, name=args.model_logs_folder)
-    trainer = pl.Trainer(gpus=args.gpus, max_epochs=args.epochs, progress_bar_refresh_rate=100, logger=logger)
+    trainer = pl.Trainer(default_root_dir=args.model_checkpoint, gpus=args.gpus, max_epochs=args.epochs, progress_bar_refresh_rate=100, logger=logger)
     trainer.fit(vae, train_dl, test_dl)
 
     print("Training Finished")
