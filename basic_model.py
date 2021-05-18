@@ -1,4 +1,5 @@
 import sys
+import math
 import argparse
 
 import numpy as np
@@ -150,10 +151,14 @@ class VAE(pl.LightningModule):
         elbo, kl, recon_lkh = self.compute_losses(x, z, x_hat)
         ##### Create dictionary
         val_dictionary = self.create_dictionary(elbo, kl, recon_lkh)
+        ##### Include PSNR into dictionary
+        psnr = 10 * math.log10(1/(torch.mean(torch.square(torch.subtract(x, x_hat)))))
+        val_dictionary.update({"psnr": psnr})
         ##### Save sample as example.
         if self.test_idx == batch_idx:
             self.orig_validation_sample = x[0]
             self.rec_validation_sample = x_hat[0]
+            self.psnr_sample = psnr
 
         return val_dictionary
 
@@ -172,13 +177,15 @@ class VAE(pl.LightningModule):
 
     def validation_epoch_end(self, validation_step_outputs):
         ##### Get scalars and images
-        mean_losses = torch.mean(torch.as_tensor([[batch['loss'], batch['kl'], batch['recon_lkh']] for batch in validation_step_outputs]), 0)
+        mean_losses = torch.mean(torch.as_tensor([[batch['loss'], batch['kl'], batch['recon_lkh'], batch['psnr']] 
+                                                                            for batch in validation_step_outputs]), 0)
         ##### Include scalars in tensorboard
         list(map(lambda metric, value: self.logger.experiment.add_scalar(metric, value, self.current_epoch), 
-                                            ['Val_ELBO_Loss', 'Val_KL_Loss', 'Val_Recon_Likelihood'], mean_losses))
+                                        ['Val_ELBO_Loss', 'Val_KL_Loss', 'Val_Recon_Likelihood', 'Val_PSNR'], mean_losses))
         ##### Include images
         self.logger.experiment.add_image("Val_Original_Image", self.orig_validation_sample, self.current_epoch)
         self.logger.experiment.add_image("Val_Reconstructed_Image", self.rec_validation_sample, self.current_epoch)
+        self.logger.experiment.add_scalar("Val_Image_PSNR", self.psnr_sample, self.current_epoch)
         self.test_idx = np.random.choice(self.test_images_amount)
 
 
@@ -212,7 +219,6 @@ if __name__ == "__main__":
                                             ]))
     train_dl = DataLoader(training_folder, batch_size=args.batchsize, shuffle=True, num_workers=args.num_workers)
     test_dl = DataLoader(testing_folder, shuffle=True, num_workers=args.num_workers)
-
 
     ##### Instantiate and run model
     vae = VAE(len(train_dl), args.batchsize)
