@@ -205,7 +205,7 @@ if __name__ == "__main__":
     parser.add_argument('--batchsize', default=8, type=int, help='Batch size.')
     parser.add_argument('--gpus', default=1, type=int, help="Amount of GPU availables.")
     parser.add_argument('--num_workers', default=0, type=int, help="CPU cores for multi-processing.")
-    parser.add_argument('--epochs', default=200000, type=int, help="Epochs to run.")
+    parser.add_argument('--epochs', default=100, type=int, help="Epochs to run.")
     ##### Return namespace.
     args = parser.parse_args(sys.argv[1:])
 
